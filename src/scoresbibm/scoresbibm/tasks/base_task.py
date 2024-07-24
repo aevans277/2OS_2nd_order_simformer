@@ -91,25 +91,33 @@ class AllConditionalTask(Task):
         raise NotImplementedError()
 
 partial(jax.jit, static_argnums=(1, 5))
+
+
 def base_batch_sampler(key, batch_size, data, node_id, meta_data=None, num_devices=1):
     assert data.ndim == 3, "Data must be 3D, (num_samples, num_nodes, dim)"
     assert (
-        node_id.ndim == 2 or node_id.ndim == 1
+            node_id.ndim == 2 or node_id.ndim == 1
     ), "Node id must be 2D or 1D, (num_nodes, dim) or (num_nodes,)"
 
-    index = jax.random.randint(key, shape=(num_devices,batch_size,), minval=0, maxval=data.shape[0])
-    data_batch = data[index,...]
-    node_id_batch = jnp.repeat(node_id[None, ...], num_devices, axis=0).astype(
-        jnp.int32
-    )
+    index = jax.random.randint(key, shape=(num_devices, batch_size,), minval=0, maxval=data.shape[0])
+    data_batch = data[index, ...]
+    node_id_batch = jnp.repeat(node_id[None, ...], num_devices, axis=0).astype(jnp.int32)
+
     if meta_data is not None:
         if meta_data.ndim == 3:
-            meta_data_batch = meta_data[index,...]
+            meta_data_batch = meta_data[index, ...]
         else:
             meta_data_batch = jnp.repeat(meta_data[None, ...], num_devices, axis=0)
     else:
         meta_data_batch = None
+
+    # Add debug prints
+    print(
+        f"base_batch_sampler - Batch shapes: data_batch: {data_batch.shape}, node_id_batch: {node_id_batch.shape}, meta_data_batch: {meta_data_batch.shape if meta_data_batch is not None else 'None'}")
+
     return data_batch, node_id_batch, meta_data_batch
+
+
     
     
     

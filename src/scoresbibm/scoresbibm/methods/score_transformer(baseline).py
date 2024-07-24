@@ -13,65 +13,41 @@ from scoresbibm.tasks.base_task import base_batch_sampler
 from scoresbibm.utils.condition_masks import get_condition_mask_fn
 from scoresbibm.utils.edge_masks import get_edge_mask_fn
 
-from jax.tree_util import tree_map, tree_flatten, tree_unflatten
 
 
-def hessian_trace_estimator(loss_fn, params, key, data, node_id, meta_data, num_samples=10, model_fn=None, mean_fn=None,
-                            std_fn=None, weight_fn=None, condition_mask=None, data_id=None):
+def hessian_trace_estimator(loss_fn, params, key, data, node_id, meta_data, num_samples=10, model_fn=None, mean_fn=None, std_fn=None, weight_fn=None, condition_mask=None, data_id=None):
     """Estimates the trace of the Hessian matrix of the loss function using Hutchinson's estimator."""
 
-    def hvp(params, v):
+    def flatten_params(params):
+        flat_params, tree_def = jax.tree_flatten(params)
+        return jnp.concatenate([jnp.ravel(p) for p in flat_params]), tree_def
+
+    def unflatten_params(flat_params, tree_def):
+        split_indices = []
+        for p in tree_def.flatten_up_to(params):
+            split_indices.append(p.size)
+        split_params = jnp.split(flat_params, np.cumsum(split_indices)[:-1])
+        reshaped_params = [p.reshape(s.shape) for p, s in zip(split_params, tree_def.flatten_up_to(params))]
+        return jax.tree_unflatten(tree_def, reshaped_params)
+
+    flat_params, tree_def = flatten_params(params)
+
+    def loss_value_fn(flat_params):
+        params = unflatten_params(flat_params, tree_def)
+        return loss_fn(params, key, data, node_id, meta_data, model_fn=model_fn, mean_fn=mean_fn, std_fn=std_fn, weight_fn=weight_fn, condition_mask=condition_mask, data_id=data_id)
+
+    def hvp(flat_params, v):
         """Computes the Hessian-vector product."""
+        return jax.jvp(jax.grad(loss_value_fn), (flat_params,), (v,))[1]
 
-        def loss_value_fn(params):
-            print(f"Inside loss_value_fn - data shape: {data.shape}, variable_dim: {data.shape[-1]}")
-            loss = loss_fn(params, key, data, node_id, meta_data, model_fn=model_fn, mean_fn=mean_fn, std_fn=std_fn,
-                           weight_fn=weight_fn, data_id=data_id, condition_mask=condition_mask)
-            print("Loss computed inside hvp.")
-            return loss
-
-        print("Before calling jax.jvp in hvp")
-        result = jax.jvp(jax.grad(loss_value_fn), (params,), (v,))[1]
-        print("After calling jax.jvp in hvp")
-        return result
-
-    print(f"Initial data shape in hessian_trace_estimator: {data.shape}")
     hessian_trace = 0.0
     for _ in range(num_samples):
         key, subkey = jax.random.split(key)
-
-        # Generate random noise with the same structure and shape as params
-        v = tree_map(lambda p: jax.random.normal(subkey, p.shape), params)
-
-        # Check if noise and params have the same shape and print a message
-        noise_shapes = tree_map(lambda x: x.shape, v)
-        params_shapes = tree_map(lambda x: x.shape, params)
-
-        if noise_shapes == params_shapes:
-            print("Noise and params have matching shapes.")
-        else:
-            print("Noise and params do not have matching shapes.")
-
-        # Compute the Hessian-vector product
-        hvp_v = hvp(params, v)
-
-        # Debugging: Print shapes and sizes of the Hessian-vector product
-        print(f"HVP shape: {tree_map(lambda x: x.shape, hvp_v)}")
-        print(f"HVP size: {tree_map(lambda x: x.size, hvp_v)}")
-
-        # Flatten and compare the sizes
-        params_flat, _ = tree_flatten(params)
-        v_flat, _ = tree_flatten(v)
-        hvp_v_flat, _ = tree_flatten(hvp_v)
-        print(f"Params flat sizes: {[x.size for x in params_flat]}")
-        print(f"Noise flat sizes: {[x.size for x in v_flat]}")
-        print(f"HVP flat sizes: {[x.size for x in hvp_v_flat]}")
-
-        # Sum up the product of noise and the Hessian-vector product
-        hessian_trace += tree_reduce(lambda x, y: x + jnp.sum(y * v), hvp_v, initializer=0.0)
+        v = jax.random.normal(subkey, shape=flat_params.shape)
+        hvp_v = hvp(flat_params, v)
+        hessian_trace += jnp.dot(v, hvp_v)
 
     return hessian_trace / num_samples
-
 
 
 
@@ -173,12 +149,6 @@ def run_train_transformer_model(
     for j in range(total_number_steps):
         key, key_batch, key_update, key_val = jax.random.split(key, 4)
         data_batch, node_id_batch, meta_data_batch = sampler(key_batch, batch_size_per_device)
-
-        print(f"Batch {j}:")
-        print(f"  data_batch shape: {data_batch.shape}")
-        print(f"  node_id_batch shape: {node_id_batch.shape}")
-        print(f"  meta_data_batch shape: {meta_data_batch.shape if meta_data_batch is not None else 'None'}")
-
         loss, replicated_params, replicated_opt_state = update(
             replicated_params,
             replicated_opt_state,
@@ -316,21 +286,23 @@ def train_transformer_model(task, data, method_cfg, rng):
     )
     edge_mask_fn = get_edge_mask_fn(edge_mask_params["name"], task)
 
+    # Training loop
+    @jax.jit
+    @jax.jit
     def loss_fn(params, key, data, node_id, meta_data):
-        print(
-            f"Initial loss function shapes - data: {data.shape}, node_id: {node_id.shape}, meta_data: {meta_data.shape if meta_data is not None else 'None'}")
         key_times, key_loss, key_condition = jax.random.split(key, 3)
-        times = jax.random.uniform(key_times, (data.shape[0],), minval=T_min, maxval=T_max)
+        times = jax.random.uniform(
+            key_times, (data.shape[0],), minval=T_min, maxval=T_max
+        )
 
         # Structured conditioning
-        condition_mask = condition_mask_fn(key_condition, data.shape[0], theta_dim, x_dim)
+        condition_mask = condition_mask_fn(
+            key_condition, data.shape[0], theta_dim, x_dim
+        )
         if meta_data is None:
             edge_mask = jax.vmap(edge_mask_fn, in_axes=(None, 0))(node_id, condition_mask)
         else:
             edge_mask = jax.vmap(edge_mask_fn, in_axes=(None, 0, 0))(node_id, condition_mask, meta_data)
-
-        print(
-            f"Before calling denoising_score_matching_loss - data shape: {data.shape}, node_id shape: {node_id.shape}, condition_mask shape: {condition_mask.shape}, meta_data shape: {meta_data.shape if meta_data is not None else 'None'}")
 
         loss = denoising_score_matching_loss(
             params,
@@ -349,8 +321,6 @@ def train_transformer_model(task, data, method_cfg, rng):
             edge_mask=edge_mask,
         )
 
-        print("Loss calculated successfully")
-
         # Regularisation term
         hessian_trace = hessian_trace_estimator(
             denoising_score_matching_loss, params, key_loss, data, node_id, meta_data,
@@ -359,13 +329,10 @@ def train_transformer_model(task, data, method_cfg, rng):
         )
         regularisation_term = 0.01 * hessian_trace  # Adjust the weight of the regularisation term as needed
 
-        print("Hessian trace calculated successfully")
-
         return loss + regularisation_term
 
     @partial(jax.pmap, axis_name="num_devices")
     def update(params, opt_state, key, data, node_id, meta_data):
-        print(f"Update function called with node_id shape: {node_id.shape}")  # Debug: Update function
         loss, grads = jax.value_and_grad(loss_fn)(params, key, data, node_id, meta_data)
 
         loss = jax.lax.pmean(loss, axis_name="num_devices")
@@ -423,4 +390,3 @@ def train_transformer_model(task, data, method_cfg, rng):
     model.set_default_edge_mask_fn(edge_mask_fn)
 
     return model
-
