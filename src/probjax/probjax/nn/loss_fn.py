@@ -118,30 +118,26 @@ def denoising_score_matching_loss(
         std_fn (Callable): Std function of the SDE.
         weight_fn (Callable): Weight function for the loss.
         axis (int, optional): Axis to sum over. Defaults to -2.
+        
 
     Returns:
         Array: Loss
     """
-    print(f"Inside denoising_score_matching_loss - Initial xs_target shape: {xs_target.shape}, variable_dim: {xs_target.shape[-1]}")
     eps = jax.random.normal(key, shape=xs_target.shape)
     mean_t = mean_fn(times, xs_target)
     std_t = std_fn(times, xs_target)
-    print(f"mean_t shape: {mean_t.shape}, std_t shape: {std_t.shape}, eps shape: {eps.shape}")
     xs_t = mean_t + std_t * eps
-    print(f"Inside denoising_score_matching_loss - Transformed xs_t shape: {xs_t.shape}, variable_dim: {xs_t.shape[-1]}")
-
+    
     if loss_mask is not None:
         loss_mask = loss_mask.reshape(xs_target.shape)
         xs_t = jnp.where(loss_mask, xs_target, xs_t)
-
+    
     score_pred = model_fn(params, times, xs_t, *args, **kwargs)
-    print(f"Inside denoising_score_matching_loss - score_pred shape: {score_pred.shape}, variable_dim: {score_pred.shape[-1]}")
-
     score_target = -eps / std_t
 
     loss = (score_pred - score_target) ** 2
     if loss_mask is not None:
-        loss = jnp.where(loss_mask, 0.0, loss)
+        loss = jnp.where(loss_mask, 0.0,loss)
     loss = weight_fn(times) * jnp.sum(loss, axis=axis, keepdims=True)
     if rebalance_loss:
         num_elements = jnp.sum(~loss_mask, axis=axis, keepdims=True)

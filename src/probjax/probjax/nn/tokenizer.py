@@ -143,59 +143,32 @@ class ScalarTokenizer(Tokenizer):
         )
 
     def __call__(self, data_id: Array, data: Array, meta_data: Optional[Array] = None):
-        print(f"Tokenizer called with data_id shape: {data_id.shape}")
-
         *leading_dims, sequence_length, variable_dim = data.shape
-        print(f"Initial shapes - leading_dims: {leading_dims}, sequence_length: {sequence_length}, variable_dim: {variable_dim}")
-
-        if data_id.ndim == 1:
-            data_id = data_id.reshape(1, -1)  # Reshape to (1, sequence_length)
-        print(f"Initial shapes - data_id: {data_id.shape}")
 
         data = data.reshape(-1, sequence_length, variable_dim)
-
-        if data_id.shape[0] == 1 and len(leading_dims) > 0 and leading_dims[0] > 1:
-            data_id = jnp.broadcast_to(data_id, (leading_dims[0], sequence_length)).reshape(leading_dims[0], sequence_length, 1)
-        else:
-            data_id = data_id.reshape(1, sequence_length, 1)
-        print(f"Reshaped data_id shape for broadcasting: {data_id.shape}")
-
+        data_id = data_id.astype(jnp.int32).reshape(-1, sequence_length, 1)
         data_id, data = jnp.broadcast_arrays(data_id, data)
 
         if meta_data is not None:
-            meta_data = meta_data.reshape(-1, sequence_length, variable_dim)
+            meta_data.reshape(-1, sequence_length, variable_dim)
             data_id, data, meta_data = jnp.broadcast_arrays(data_id, data, meta_data)
 
-        output_dim1, output_dim2, output_dim3 = self.distribute_output_dim(with_meta_data=meta_data is not None)
-
-        print(f"Data ID Embedding output dimensions: {output_dim1}")
-        print(f"Data Embedding output dimensions: {output_dim2}")
-        if meta_data is not None:
-            print(f"Meta Data Embedding output dimensions: {output_dim3}")
+        output_dim1, output_dim2, output_dim3 = self.distribute_output_dim(
+            with_meta_data=meta_data is not None
+        )
 
         data_id_embeding = self.node_embeding(data_id, output_dim1)
         data_embeding = self.value_embeding(data, output_dim2)
 
-        print(f"data_id_embeding shape: {data_id_embeding.shape}")
-        print(f"data_embeding shape: {data_embeding.shape}")
-
         if meta_data is not None:
             meta_data_embeding = self.meta_data_embeding(meta_data, output_dim3)
-            print(f"meta_data_embeding shape: {meta_data_embeding.shape}")
         else:
             meta_data_embeding = None
 
         tokens = self.accumulate(data_id_embeding, data_embeding, meta_data_embeding)
-        print(f"Tokens shape before reshaping: {tokens.shape}")
 
-        try:
-            reshaped_tokens = tokens.reshape(*leading_dims, sequence_length, self.output_dim)
-            print(f"Reshaped tokens shape: {reshaped_tokens.shape}")
-        except Exception as e:
-            print(f"Error reshaping tokens: {e}")
-            raise
+        return tokens.reshape(*leading_dims, sequence_length, self.output_dim)
 
-        return reshaped_tokens
 
     @hk.transparent
     def value_embeding(self, value, output_dim):

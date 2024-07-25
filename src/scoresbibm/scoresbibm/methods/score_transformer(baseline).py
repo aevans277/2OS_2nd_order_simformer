@@ -1,6 +1,5 @@
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 import optax
 
@@ -12,43 +11,6 @@ from scoresbibm.methods.neural_nets import scalar_transformer_model
 from scoresbibm.tasks.base_task import base_batch_sampler
 from scoresbibm.utils.condition_masks import get_condition_mask_fn
 from scoresbibm.utils.edge_masks import get_edge_mask_fn
-
-
-
-def hessian_trace_estimator(loss_fn, params, key, data, node_id, meta_data, num_samples=10, model_fn=None, mean_fn=None, std_fn=None, weight_fn=None, condition_mask=None, data_id=None):
-    """Estimates the trace of the Hessian matrix of the loss function using Hutchinson's estimator."""
-
-    def flatten_params(params):
-        flat_params, tree_def = jax.tree_flatten(params)
-        return jnp.concatenate([jnp.ravel(p) for p in flat_params]), tree_def
-
-    def unflatten_params(flat_params, tree_def):
-        split_indices = []
-        for p in tree_def.flatten_up_to(params):
-            split_indices.append(p.size)
-        split_params = jnp.split(flat_params, np.cumsum(split_indices)[:-1])
-        reshaped_params = [p.reshape(s.shape) for p, s in zip(split_params, tree_def.flatten_up_to(params))]
-        return jax.tree_unflatten(tree_def, reshaped_params)
-
-    flat_params, tree_def = flatten_params(params)
-
-    def loss_value_fn(flat_params):
-        params = unflatten_params(flat_params, tree_def)
-        return loss_fn(params, key, data, node_id, meta_data, model_fn=model_fn, mean_fn=mean_fn, std_fn=std_fn, weight_fn=weight_fn, condition_mask=condition_mask, data_id=data_id)
-
-    def hvp(flat_params, v):
-        """Computes the Hessian-vector product."""
-        return jax.jvp(jax.grad(loss_value_fn), (flat_params,), (v,))[1]
-
-    hessian_trace = 0.0
-    for _ in range(num_samples):
-        key, subkey = jax.random.split(key)
-        v = jax.random.normal(subkey, shape=flat_params.shape)
-        hvp_v = hvp(flat_params, v)
-        hessian_trace += jnp.dot(v, hvp_v)
-
-    return hessian_trace / num_samples
-
 
 
 def mean_std_per_node_id(data, node_ids):
@@ -79,9 +41,6 @@ def get_z_score_fn(data_mean_per_node_id, data_std_per_node_id):
     return z_score, un_z_score
 
 
-import os
-
-
 def run_train_transformer_model(
         key,
         params,
@@ -94,13 +53,12 @@ def run_train_transformer_model(
         update,
         batch_sampler,
         loss_fn,
-        print_every=10,
-        val_every=10,
+        print_every=100,
+        val_every=100,
         validation_fraction=0.05,
         val_repeat=2,
         val_error_ratio=1.1,
         stop_early_count=5,
-        log_file="training_log.txt"
 ):
     # Set up stuff for multi-device training
     num_devices = jax.device_count()
@@ -141,15 +99,10 @@ def run_train_transformer_model(
     min_l_val = 1e10
     early_stopping_params = None
 
-    # Ensure the log file directory exists
-    log_dir = os.path.dirname(log_file)
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-
     for j in range(total_number_steps):
         key, key_batch, key_update, key_val = jax.random.split(key, 4)
         data_batch, node_id_batch, meta_data_batch = sampler(key_batch, batch_size_per_device)
-        loss, replicated_params, replicated_opt_state = update(
+        loss, replicated_params, replicated_opt_state, nois_loss = update(
             replicated_params,
             replicated_opt_state,
             jax.random.split(key_update, (num_devices,)),
@@ -157,6 +110,10 @@ def run_train_transformer_model(
             node_id_batch,
             meta_data_batch,
         )
+
+        print(f'Primary loss: {loss}')
+        print(f'Noisy loss: {nois_loss}')
+
         # Train loss
         if j == 0:
             l_train = loss[0]
@@ -187,16 +144,11 @@ def run_train_transformer_model(
                 lambda x: x[0], replicated_opt_state
             )
 
-        # Save to log file every 10 steps
+        # Print
         if (j % print_every) == 0:
-            with open(log_file, "a") as f:
-                f.write(f"Step: {j}, Train loss: {l_train}")
-                print("Train loss: ", l_train)
-                if l_val is not None:
-                    f.write(f", Validation loss: {l_val}, Early stopping count: {early_stopping_counter}\n")
-                    print("Validation loss: ", l_val, early_stopping_counter)
-                else:
-                    f.write("\n")
+            print("Train loss: ", l_train)
+            if l_val is not None:
+                print("Validation loss: ", l_val, early_stopping_counter)
 
     params = jax.tree_map(lambda x: x[0], replicated_params)
     opt_state = jax.tree_map(lambda x: x[0], replicated_opt_state)
@@ -287,10 +239,11 @@ def train_transformer_model(task, data, method_cfg, rng):
     edge_mask_fn = get_edge_mask_fn(edge_mask_params["name"], task)
 
     # Training loop
-    @jax.jit
-    @jax.jit
+    # @jax.jit
     def loss_fn(params, key, data, node_id, meta_data):
         key_times, key_loss, key_condition = jax.random.split(key, 3)
+
+        # samples times (different points in the diffusion process)
         times = jax.random.uniform(
             key_times, (data.shape[0],), minval=T_min, maxval=T_max
         )
@@ -321,15 +274,23 @@ def train_transformer_model(task, data, method_cfg, rng):
             edge_mask=edge_mask,
         )
 
-        # Regularisation term
-        hessian_trace = hessian_trace_estimator(
-            denoising_score_matching_loss, params, key_loss, data, node_id, meta_data,
-            model_fn=model_fn, mean_fn=sde.marginal_mean, std_fn=sde.marginal_stddev, weight_fn=weight_fn,
-            condition_mask=condition_mask, data_id=node_id
-        )
-        regularisation_term = 0.01 * hessian_trace  # Adjust the weight of the regularisation term as needed
+        return loss
 
-        return loss + regularisation_term
+    def noisy_loss(params, key_test, data, node_id, meta_data):
+
+        num_samples = 10
+
+        epsilon = jax.random.normal(key_test, shape=data.shape)
+        print('Noise sampled')
+        data_plus_epsilon = data + epsilon
+        data_minus_epsilon = data - epsilon
+        print('Noise added to data')
+
+        noisy_loss, noisy_grads = jax.value_and_grad(loss_fn)(params, key_test, data_plus_epsilon, node_id, meta_data)
+
+        print(f'Loss calculated for noisy data')
+
+        return noisy_loss
 
     @partial(jax.pmap, axis_name="num_devices")
     def update(params, opt_state, key, data, node_id, meta_data):
@@ -338,9 +299,12 @@ def train_transformer_model(task, data, method_cfg, rng):
         loss = jax.lax.pmean(loss, axis_name="num_devices")
         grads = jax.lax.pmean(grads, axis_name="num_devices")
 
+        # noise loss calculated
+        nois_loss = noisy_loss(params, key, data, node_id, meta_data)
+
         updates, opt_state = optimizer.update(grads, opt_state, params=params)
         params = optax.apply_updates(params, updates)
-        return loss, params, opt_state
+        return loss, params, opt_state, nois_loss
 
     rng, rng_train = jax.random.split(rng)
     batch_sampler = task.get_batch_sampler()
