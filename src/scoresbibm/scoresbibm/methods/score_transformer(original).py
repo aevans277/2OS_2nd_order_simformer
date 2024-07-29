@@ -101,7 +101,7 @@ def run_train_transformer_model(
     for j in range(total_number_steps):
         key, key_batch, key_update, key_val = jax.random.split(key, 4)
         data_batch, node_id_batch, meta_data_batch = sampler(key_batch, batch_size_per_device)
-        loss, replicated_params, replicated_opt_state, base_loss, reg_term, score_hess, target_hess = update(
+        loss, replicated_params, replicated_opt_state = update(
             replicated_params,
             replicated_opt_state,
             jax.random.split(key_update, (num_devices,)),
@@ -112,16 +112,12 @@ def run_train_transformer_model(
         # Train loss
         if j == 0:
             l_train = loss[0]
-            l_train_base = base_loss[0]
-            l_train_reg = reg_term[0]
         else:
             l_train = 0.9 * l_train + 0.1 * loss[0]
-            l_train_base = 0.9 * l_train_base + 0.1 * base_loss[0]
-            l_train_reg = 0.9 * l_train_reg + 0.1 * reg_term[0]
 
         # Validation loss
         if validation_fraction > 0 and ((j % val_every) == 0) and j > 50:
-            l_val, _, val_base_loss, val_reg_term, val_score_hess, val_target_hess = loss_fn(
+            l_val = loss_fn(
                 jax.tree_map(lambda x: x[0], replicated_params),
                 key_val,
                 data_val,
@@ -145,11 +141,9 @@ def run_train_transformer_model(
 
         # Print
         if (j % print_every) == 0:
-            print(f"Iteration {j}")
-            print(f"    Expectation: Loss [{l_train:.3f}], Base Loss [{l_train_base:.3f}], Regularisation [{l_train_reg:.3f}]")
-            print(f"    Iteration:   Loss {loss}, Base Loss {base_loss}, Regularisation {reg_term} (Score Hess. {score_hess}, Target Hess. {target_hess})")
+            print("Train loss: ", l_train)
             if l_val is not None:
-                print(f"    Validation:  Loss [{l_val:.3f}], Base Loss [{val_base_loss:.3f}], Regularisation [{val_reg_term:.3f}] (Score Hess. [{val_score_hess:.3f}], Target Hess. [{val_target_hess:.3f}]), E.S.Counter {early_stopping_counter}")
+                print("Validation loss: ", l_val, early_stopping_counter)
 
     params = jax.tree_map(lambda x: x[0], replicated_params)
     opt_state = jax.tree_map(lambda x: x[0], replicated_opt_state)
@@ -257,7 +251,7 @@ def train_transformer_model(task, data, method_cfg, rng):
             edge_mask = jax.vmap(edge_mask_fn, in_axes=(None, 0, 0))(node_id, condition_mask, meta_data)
 
 
-        loss, base_loss, reg_term, score_hess, target_hess = denoising_score_matching_loss(
+        loss = denoising_score_matching_loss(
             params,
             key_loss,
             times,
@@ -273,41 +267,18 @@ def train_transformer_model(task, data, method_cfg, rng):
             meta_data=meta_data,
             edge_mask=edge_mask,
         )
-
-        # Compute gradients
-        grads = jax.grad(lambda p: denoising_score_matching_loss(
-            p,
-            key_loss,
-            times,
-            data,
-            loss_mask=condition_mask,
-            model_fn=model_fn,
-            mean_fn=sde.marginal_mean,
-            std_fn=sde.marginal_stddev,
-            weight_fn=weight_fn,
-            rebalance_loss=train_params["rebalance_loss"],
-            data_id=node_id,
-            condition_mask=condition_mask,
-            meta_data=meta_data,
-            edge_mask=edge_mask,
-        )[0])(params)
-
-        return loss, grads, base_loss, reg_term, score_hess, target_hess
+        return loss
 
     @partial(jax.pmap, axis_name="num_devices")
     def update(params, opt_state, key, data, node_id, meta_data):
-        loss, grads, base_loss, reg_term, score_hess, target_hess = loss_fn(
-            params, key, data, node_id, meta_data
-        )
+        loss, grads = jax.value_and_grad(loss_fn)(params, key, data, node_id, meta_data)
 
         loss = jax.lax.pmean(loss, axis_name="num_devices")
         grads = jax.lax.pmean(grads, axis_name="num_devices")
-        base_loss = jax.lax.pmean(base_loss, axis_name="num_devices")
-        reg_term = jax.lax.pmean(reg_term, axis_name="num_devices")
 
         updates, opt_state = optimizer.update(grads, opt_state, params=params)
         params = optax.apply_updates(params, updates)
-        return loss, params, opt_state, base_loss, reg_term, score_hess, target_hess
+        return loss, params, opt_state
 
     rng, rng_train = jax.random.split(rng)
     batch_sampler = task.get_batch_sampler()

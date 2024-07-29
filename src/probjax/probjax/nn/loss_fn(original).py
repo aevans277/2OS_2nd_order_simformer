@@ -142,37 +142,9 @@ def denoising_score_matching_loss(
     if rebalance_loss:
         num_elements = jnp.sum(~loss_mask, axis=axis, keepdims=True)
         loss = jnp.where(num_elements > 0, loss / num_elements, 0.0)
+    loss = jnp.mean(loss)
 
-    base_loss = jnp.mean(loss)
-
-    beta = 0
-    gamma = 1e-5
-
-    key, subkey = jax.random.split(key)
-    hutchinson_eps = jax.random.normal(subkey, shape=xs_target.shape) # {epsilon} generates noise
-
-
-    # model predicted
-    score_pred_shifted = model_fn(params, times, xs_t + hutchinson_eps, *args, **kwargs) # {s_phi(perturbed data)}
-    score_hess = jnp.mean(jnp.sum(hutchinson_eps * (score_pred_shifted - score_pred), axis=-1)) # {hessian trace}
-
-    step_std_t = std_fn(times, xs_t)
-
-    # target score
-    score_target_shifted = -hutchinson_eps / step_std_t # {delta_log_prob(perturbed data)}
-    target_hess = jnp.mean(jnp.sum(hutchinson_eps * (score_target_shifted - score_target), axis=-1)) # {hessian trace}
-
-    # DEBUG
-    #target_hess = 0
-    # DEBUG
-
-    beta_reg = (score_hess - target_hess)**2
-    gamma_reg = score_hess**2
-    reg_term = (beta * beta_reg) + (gamma * gamma_reg)
-
-    total_loss = base_loss + reg_term
-
-    return total_loss, base_loss, reg_term, score_hess, target_hess
+    return loss
 
 
 def score_matching_loss(

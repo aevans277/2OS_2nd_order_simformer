@@ -16,16 +16,16 @@ from jaxtyping import PyTree, Array
 
 @partial(jax.jit, static_argnames=("model_fn", "mean_fn", "std_fn"))
 def conditional_flow_and_score_matching_loss(
-    params: PyTree,
-    key: PRNGKey,
-    times: Array,
-    xs_source: Array,
-    xs_target: Array,
-    model_fn: Callable,
-    mean_fn: Callable,
-    std_fn: Callable,
-    *args,
-    estimate_score: bool = False,
+        params: PyTree,
+        key: PRNGKey,
+        times: Array,
+        xs_source: Array,
+        xs_target: Array,
+        model_fn: Callable,
+        mean_fn: Callable,
+        std_fn: Callable,
+        *args,
+        estimate_score: bool = False,
 ):
     """This function computes the conditional flow matching loss and score matching loss. By setting estimate_score to False, only the conditional flow matching loss is computed. By setting estimate_score to True, both the conditional flow matching loss and score matching loss are computed.
 
@@ -54,7 +54,7 @@ def conditional_flow_and_score_matching_loss(
     # Sample x_t
     eps = jax.random.normal(key, shape=xs_source.shape)
     xs_t = (
-        mean_fn(xs_source, xs_target, times) + std_fn(xs_source, xs_target, times) * eps
+            mean_fn(xs_source, xs_target, times) + std_fn(xs_source, xs_target, times) * eps
     )
 
     # Compute u_t -> For flow matching
@@ -91,19 +91,19 @@ def conditional_flow_and_score_matching_loss(
 
 
 def denoising_score_matching_loss(
-    params: PyTree,
-    key: PRNGKey,
-    times: Array,
-    xs_target: Array,
-    loss_mask: Optional[Array],
-    *args,
-    model_fn: Callable,
-    mean_fn: Callable,
-    std_fn: Callable,
-    weight_fn: Callable,
-    axis: int = -2,
-    rebalance_loss: bool = False,
-    **kwargs,
+        params: PyTree,
+        key: PRNGKey,
+        times: Array,
+        xs_target: Array,
+        loss_mask: Optional[Array],
+        *args,
+        model_fn: Callable,
+        mean_fn: Callable,
+        std_fn: Callable,
+        weight_fn: Callable,
+        axis: int = -2,
+        rebalance_loss: bool = False,
+        **kwargs,
 ) -> Array:
     """This function computes the denoising score matching loss. Which can be used to train diffusion models.
 
@@ -118,7 +118,7 @@ def denoising_score_matching_loss(
         std_fn (Callable): Std function of the SDE.
         weight_fn (Callable): Weight function for the loss.
         axis (int, optional): Axis to sum over. Defaults to -2.
-        
+
 
     Returns:
         Array: Loss
@@ -127,17 +127,17 @@ def denoising_score_matching_loss(
     mean_t = mean_fn(times, xs_target)
     std_t = std_fn(times, xs_target)
     xs_t = mean_t + std_t * eps
-    
+
     if loss_mask is not None:
         loss_mask = loss_mask.reshape(xs_target.shape)
         xs_t = jnp.where(loss_mask, xs_target, xs_t)
-    
+
     score_pred = model_fn(params, times, xs_t, *args, **kwargs)
     score_target = -eps / std_t
 
     loss = (score_pred - score_target) ** 2
     if loss_mask is not None:
-        loss = jnp.where(loss_mask, 0.0,loss)
+        loss = jnp.where(loss_mask, 0.0, loss)
     loss = weight_fn(times) * jnp.sum(loss, axis=axis, keepdims=True)
     if rebalance_loss:
         num_elements = jnp.sum(~loss_mask, axis=axis, keepdims=True)
@@ -149,25 +149,22 @@ def denoising_score_matching_loss(
     gamma = 1e-5
 
     key, subkey = jax.random.split(key)
-    hutchinson_eps = jax.random.normal(subkey, shape=xs_target.shape) # {epsilon} generates noise
-
+    hutchinson_eps = jax.random.normal(subkey, shape=xs_target.shape)  # {epsilon} generates noise
 
     # model predicted
-    score_pred_shifted = model_fn(params, times, xs_t + hutchinson_eps, *args, **kwargs) # {s_phi(perturbed data)}
-    score_hess = jnp.mean(jnp.sum(hutchinson_eps * (score_pred_shifted - score_pred), axis=-1)) # {hessian trace}
-
-    step_std_t = std_fn(times, xs_t)
+    score_pred_shifted = model_fn(params, times, xs_t + hutchinson_eps, *args, **kwargs)  # {s_phi(perturbed data)}
+    score_hess = jnp.mean(jnp.sum(hutchinson_eps * (score_pred_shifted - score_pred), axis=-1))  # {hessian trace}
 
     # target score
-    score_target_shifted = -hutchinson_eps / step_std_t # {delta_log_prob(perturbed data)}
-    target_hess = jnp.mean(jnp.sum(hutchinson_eps * (score_target_shifted - score_target), axis=-1)) # {hessian trace}
+    score_target_shifted = -hutchinson_eps / std_t  # {delta_log_prob(perturbed data)}
+    target_hess = jnp.mean(jnp.sum(hutchinson_eps * (score_target_shifted - score_target), axis=-1))  # {hessian trace}
 
     # DEBUG
-    #target_hess = 0
+    target_hess = 0
     # DEBUG
 
-    beta_reg = (score_hess - target_hess)**2
-    gamma_reg = score_hess**2
+    beta_reg = (score_hess - target_hess) ** 2
+    gamma_reg = score_hess ** 2
     reg_term = (beta * beta_reg) + (gamma * gamma_reg)
 
     total_loss = base_loss + reg_term
@@ -176,12 +173,12 @@ def denoising_score_matching_loss(
 
 
 def score_matching_loss(
-    params: PyTree,
-    times: Array,
-    xs_target: Array,
-    mask: Optional[Array],
-    *args,
-    model_fn: Callable,
+        params: PyTree,
+        times: Array,
+        xs_target: Array,
+        mask: Optional[Array],
+        *args,
+        model_fn: Callable,
 ):
     """Score matching loss. Minimizing the Fisher divergence between the model and the target distribution, using partial integration trick.
 
@@ -200,20 +197,20 @@ def score_matching_loss(
     jac_model_fn = jax.jacfwd(model_fn, argnums=2)
     score = model_fn(params, times, xs_target, *args)
     jac_score = jac_model_fn(params, times, xs_target, *args)
-    loss = jnp.trace(jac_score) + jnp.sum(score**2, axis=-1)
+    loss = jnp.trace(jac_score) + jnp.sum(score ** 2, axis=-1)
     loss = jnp.mean(jnp.where(mask, loss, 0.0))
     return loss
 
 
 def sliced_score_matching(
-    params: PyTree,
-    key: PRNGKey,
-    times: Array,
-    xs_target: Array,
-    mask: Optional[Array],
-    *args,
-    model_fn: Callable,
-    num_slices: int = 1,
+        params: PyTree,
+        key: PRNGKey,
+        times: Array,
+        xs_target: Array,
+        mask: Optional[Array],
+        *args,
+        model_fn: Callable,
+        num_slices: int = 1,
 ):
     def _f(x, v):
         val, grad = jax.value_and_grad(
@@ -227,6 +224,6 @@ def sliced_score_matching(
     # Slice directions
     v = jax.random.normal(key, shape=(num_slices, xs_target.shape[-1]))
     sliced_score, jac_trace = _f(xs_target, v)
-    loss = jnp.sum(sliced_score**2, -1) + jnp.mean(jac_trace, -1)
+    loss = jnp.sum(sliced_score ** 2, -1) + jnp.mean(jac_trace, -1)
     loss = jnp.mean(jnp.where(mask, loss, 0.0))
     return loss
